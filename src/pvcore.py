@@ -248,7 +248,8 @@ def rs_rsh_slope(c, frac_rs=0.05, frac_rsh=0.20):
     b = Vs <= frac_rsh * voc
     ps = np.polyfit(Is[a], Vs[a], 1)
     ph = np.polyfit(Vs[b], Is[b], 1)
-    return dict(Rs_slope=float(-ps[0]), Rsh_slope=float(-1 / ph[0]) if ph[0] < 0 else np.inf,
+    rsh = float(-1 / ph[0]) if ph[0] < 0 else np.inf
+    return dict(Rs_slope=float(-ps[0]), Rsh_slope=rsh if rsh <= 1e6 else np.inf,   # flat segment -> infinite
                 tan_rs=ps, tan_rsh=ph)
 
 
