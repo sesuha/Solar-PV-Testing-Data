@@ -30,7 +30,7 @@ module:
   area_m2: null                  # needed only for efficiency
 
 cleaning:  {hampel_window: 7, hampel_k: 3.0, hampel_floor_frac: 0.01}
-smoothing: {n_knots: 18, lambda: 1.0e-3, resid_k: 4.0, resid_floor: 0.02,
+smoothing: {n_knots: 30, lambda: 1.0e-3, resid_k: 4.0, resid_floor: 0.02,
             step_ratio: 1.4, step_match_V: 1.0, n_curve_points: 1500,
             anchor_v: 0.15, blend_width: 0.05}
 metrics:   {pref_window_frac: 0.10, pref_poly_order: 4,

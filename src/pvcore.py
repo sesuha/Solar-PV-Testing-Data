@@ -37,7 +37,9 @@ def shape_spline(v, i, concave=True, n_knots=18, lam=1e-3):
     D = np.diff(np.eye(nb), 2, axis=0) @ T
     A = np.vstack([B @ T, np.sqrt(lam * len(v)) * D])
     b = np.r_[i, np.zeros(D.shape[0])]
-    p = lsq_linear(A, b, bounds=(np.r_[-np.inf, np.zeros(nb - 1)], np.inf)).x
+    # bvls: exact active-set solver. The default trf stops early on this badly scaled
+    # (cumulative-sum) basis - at 30 knots it ignored five clean points on 1 Nov #6.
+    p = lsq_linear(A, b, bounds=(np.r_[-np.inf, np.zeros(nb - 1)], np.inf), method="bvls").x
     return BSpline(t, T @ p, deg, extrapolate=False)
 
 
@@ -134,7 +136,11 @@ def build_curve(fit, shape, cfg):
     sc = cfg["smoothing"]
     f = fit["fm"] if shape == "stepped" else fit["fc"]
     v, i = fit["v"][~fit["ex"]], fit["i"][~fit["ex"]]
-    a, w = sc["anchor_v"], sc["blend_width"]
+    w = sc["blend_width"]
+    # If the sweep has no clean points near Isc (QC 'Isc extrapolated'), the spline below the
+    # lowest point is unconstrained; start the end line at the lowest clean point instead, so its
+    # level and slope come from where data exist (1 Nov #6 has nothing below 7 V).
+    a = max(sc["anchor_v"], float(v.min()) + w)
     alpha, beta, how = _end_line(f, v, i, a, w)
     g = np.linspace(0, 1, sc["n_curve_points"])
     y = _eval(f, g)
@@ -146,6 +152,145 @@ def build_curve(fit, shape, cfg):
         k = j[0]
         g0 = g[k - 1] + (g[k] - g[k - 1]) * y[k - 1] / (y[k - 1] - y[k])
         g, y = np.r_[g[:k], g0], np.r_[y[:k], 0.0]
+    elif 0 < y[-1] <= 0.01:                               # ends within 1 % of Isc at the measured
+        y = np.r_[y[:-1], 0.0]                            # I = 0 point: that point is Voc
     Vs, Is = g * fit["voc"], y * fit["isc"]
-    return dict(Vs=Vs, Is=Is, Ps=Vs * Is, shape=shape, end_line=how,
+    return dict(Vs=Vs, Is=Is, Ps=Vs * Is, shape=shape, end_line=how, reaches_zero=bool(y[-1] <= 0),
                 nrmse=fit["r_c"] if shape == "normal" else fit["r_m"], status=fit["status"])
+
+
+# ---------------------------------------------------------------- Phase 4: metrics and Pmax error
+def pmax_local_poly(V, I, frac=0.10, order=4, min_side=3):
+    """IEC 60904-1 practice: Pmax from a polynomial fitted to P(V) around the MPP, instead of
+    trusting one sample (a +V spike gives a +P spike).
+
+    Returns (Pmax_ref, bracketed). The fit is only a valid reference when the data BRACKET the
+    peak: the polynomial maximum must be inside the window (not at an edge) with >= min_side
+    points on each side. Current-swept sweeps often have no points just left of a sharp knee;
+    a one-sided 4th-order fit then shoots up at the window edge (18 Oct #11: 13.90 W, above
+    every measured point)."""
+    P = V * I
+    j = np.argmax(P)
+    m = np.abs(V - V[j]) <= frac * V.max()
+    deg = min(order, m.sum() - 1)
+    c = np.polyfit(V[m], P[m], deg)
+    g = np.linspace(V[m].min(), V[m].max(), 400)
+    y = np.polyval(c, g)
+    k = int(np.argmax(y))
+    vpk = g[k]
+    interior = 0.03 * len(g) < k < 0.97 * len(g)
+    sides = (V[m] < vpk).sum() >= min_side and (V[m] > vpk).sum() >= min_side
+    # standard error of the fitted value at the peak: sigma * sqrt(leverage)
+    x = (V[m] - vpk) / max(np.ptp(V[m]), 1e-9)
+    X = np.vander(x, deg + 1)
+    dof = max(m.sum() - (deg + 1), 1)
+    sigma = np.sqrt(np.sum((P[m] - np.polyval(c, V[m])) ** 2) / dof)
+    h = np.linalg.pinv(X.T @ X)[-1, -1]                    # x0 = [0, ..., 0, 1] at the peak
+    return float(y[k]), bool(interior and sides), float(sigma * np.sqrt(max(h, 0.0)))
+
+
+def metrics(c, V, I, P, cfg):
+    mc = cfg["metrics"]
+    Vs, Is, Ps = c["Vs"], c["Is"], c["Ps"]
+    j = int(np.argmax(Ps))
+    used = c["status"] == "used"
+    pref, bracketed, se = pmax_local_poly(V[used], I[used], mc["pref_window_frac"], mc["pref_poly_order"])
+    out = dict(Voc=float(Vs[-1]), Isc=float(Is[0]), Vmp=float(Vs[j]), Imp=float(Is[j]), Pmax=float(Ps[j]),
+               Pmax_raw=float(P.max()), Pmax_ref=pref, ref_bracketed=bracketed, Pmax_ref_se=se,
+               Vmax_raw=float(V.max()), Imax_raw=float(I.max()))
+    out["FF"] = out["Pmax"] / (out["Voc"] * out["Isc"])
+    out["err_Pmax_pct"] = 100 * (out["Pmax"] - pref) / pref
+    out["err_Pmax_raw_pct"] = 100 * (out["Pmax"] - P.max()) / P.max()
+    out["u_Pmax"] = u_pmax(out, cfg)
+    return out
+
+
+def acceptance(m, shape, cfg):
+    """Pmax fidelity verdict. 'pass' if |eps| <= tolerance (1 % normal, 2.5 % stepped) OR within
+    twice the reference's own standard error (a polynomial fitted to scattered points is itself
+    uncertain); 'low confidence' otherwise; 'n/a' if the reference does not bracket the peak."""
+    if not m["ref_bracketed"]:
+        return "n/a (reference not bracketed)"
+    acc = cfg["acceptance"]
+    tol = acc["err_pmax_stepped_pct"] if shape == "stepped" else acc["err_pmax_normal_pct"]
+    lim = max(tol, 200 * m["Pmax_ref_se"] / m["Pmax_ref"])
+    return "pass" if abs(m["err_Pmax_pct"]) <= lim else "low confidence"
+
+
+def _limit(x, full, spec):
+    off = spec["offset_low"] if x < spec["split"] else spec["offset_high"]
+    return spec["rdg_pct"] / 100 * x + spec["fs_pct"] / 100 * full + off
+
+
+def u_pmax(m, cfg):
+    """4.3: standard uncertainty of Pmax (k = 1) from the PROVA 200A accuracy limits at the MPP,
+    limits treated as rectangular (/sqrt 3): u(Pmax) = Pmax * sqrt(u_V^2 + u_I^2), relative."""
+    ins = cfg["instrument"]
+    uV = _limit(m["Vmp"], m["Voc"], ins["V"]) / np.sqrt(3) / m["Vmp"]
+    uI = _limit(m["Imp"], m["Isc"], ins["I"]) / np.sqrt(3) / m["Imp"]
+    return float(m["Pmax"] * np.hypot(uV, uI))
+
+
+# ---------------------------------------------------------------- Phase 5: Rs and Rsh
+def rs_rsh_geometric(m):
+    """5.1 (notebook sketch): Rs ~ dV/Imp, Rsh ~ Vmp/dI. Quick upper-bound approximations."""
+    dV, dI = m["Voc"] - m["Vmp"], m["Isc"] - m["Imp"]
+    return dict(dV=dV, dI=dI, Rs_geo=dV / m["Imp"], Rsh_geo=m["Vmp"] / dI if dI > 0 else np.inf)
+
+
+def rs_rsh_slope(c, frac_rs=0.05, frac_rsh=0.20):
+    """5.2: -dV/dI of the SMOOTH curve near Voc (I <= frac_rs*Isc) and near Isc (V <= frac_rsh*Voc)."""
+    Vs, Is = c["Vs"], c["Is"]
+    voc, isc = Vs[-1], Is[0]
+    a = Is <= frac_rs * isc
+    if a.sum() < 3:
+        a = np.arange(len(Is)) >= len(Is) - 3
+    b = Vs <= frac_rsh * voc
+    ps = np.polyfit(Is[a], Vs[a], 1)
+    ph = np.polyfit(Vs[b], Is[b], 1)
+    return dict(Rs_slope=float(-ps[0]), Rsh_slope=float(-1 / ph[0]) if ph[0] < 0 else np.inf,
+                tan_rs=ps, tan_rsh=ph)
+
+
+from scipy.special import wrightomega  # noqa: E402
+
+
+def i_from_v(V, Iph, I0, Rs, Rsh, a):
+    """Single-diode model, explicit Lambert-W form; wrightomega avoids overflow."""
+    z = np.log(Rs * I0 * Rsh / (a * (Rs + Rsh))) + Rsh * (Rs * (Iph + I0) + V) / (a * (Rs + Rsh))
+    return (Rsh * (Iph + I0) - V) / (Rs + Rsh) - (a / Rs) * np.real(wrightomega(z))
+
+
+def fit_sdm(V, I, voc, isc, cfg, T=298.15):
+    """5.3: robust single-diode fit on the used points, with a quality gate. Module temperature was
+    not recorded, so T = 25 C is assumed for the thermal voltage (affects n only)."""
+    ns, gate = cfg["module"]["cells_in_series"], cfg["sdm_gate"]
+    vth = 1.380649e-23 * T / 1.602176634e-19
+    a0 = ns * 1.3 * vth
+    x0 = [isc, np.log(isc / np.expm1(voc / a0)), 0.5, 200.0, a0]
+    lo = [0.8 * isc, -40, 1e-3, 1.0, 0.5 * ns * vth]
+    hi = [1.2 * isc, -2, 20.0, 1e5, 3.0 * ns * vth]
+    x0 = np.clip(x0, np.array(lo) + 1e-9, np.array(hi) - 1e-9)
+
+    def res(x):
+        r = (i_from_v(V, x[0], np.exp(x[1]), x[2], x[3], x[4]) - I) / isc
+        return np.nan_to_num(r, nan=10.0, posinf=10.0, neginf=-10.0)
+
+    s = least_squares(res, x0, bounds=(lo, hi), loss="soft_l1", f_scale=0.01, x_scale="jac")
+    Iph, lnI0, Rs, Rsh, a = s.x
+    p = dict(Iph=Iph, I0=np.exp(lnI0), Rs=Rs, Rsh=Rsh, a=a, n=a / (ns * vth),
+             nrmse=float(np.sqrt(np.mean(s.fun ** 2))))
+    reasons = []
+    if not s.success:
+        reasons.append("did not converge")
+    if p["nrmse"] > gate["max_nrmse"]:
+        reasons.append(f"nRMSE {100 * p['nrmse']:.1f} % > {100 * gate['max_nrmse']:.1f} %")
+    if not gate["n_min"] <= p["n"] <= gate["n_max"]:
+        reasons.append(f"n {p['n']:.2f} outside {gate['n_min']}-{gate['n_max']}")
+    if Rs <= 0.01:
+        reasons.append("Rs at lower bound")
+    if Rsh >= 0.99e5:
+        reasons.append("Rsh at upper bound")
+    p["valid"] = not reasons
+    p["reject_reason"] = "; ".join(reasons)
+    return p
