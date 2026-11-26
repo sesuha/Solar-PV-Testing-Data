@@ -1,0 +1,50 @@
+files:
+  "18 Oct": data/raw/All_18_Oct_2026.csv
+  "1 Nov":  data/raw/All_1_Nov_2026.csv
+
+panels:   # [S1, S2] per panel, in panel order
+  "18 Oct": [[11,12],[13,14],[16,17],[19,20],[22,23],[25,26],[29,30],
+             [32,33],[35,36],[40,41],[42,43],[45,46],[48,49]]
+  "1 Nov":  [[1,2],[5,6],[8,9],[11,12],[14,15],[17,18],[21,22],[24,25],
+             [27,28],[29,30],[31,32],[33,34],[36,37],[38,39],[40,41]]
+
+module:
+  cells_in_series: 36            # assumed (not printed on the nameplates)
+  # STC nameplate ratings (data/reference/Panel_Nameplate_Data.xlsx). 18 Oct panels 1-13 = P01-P13,
+  # matched by sample number. P05 has no nameplate; 1 Nov panels have no nameplate mapping yet.
+  datasheet:
+    "18 Oct/1":  {id: P01, Voc: 22.40, Isc: 1.23, Pmax: 20}
+    "18 Oct/2":  {id: P02, Voc: 21.06, Isc: 1.17, Pmax: 20}
+    "18 Oct/3":  {id: P03, Voc: 22.10, Isc: 1.19, Pmax: 20}
+    "18 Oct/4":  {id: P04, Voc: 21.06, Isc: 1.17, Pmax: 20}
+    "18 Oct/6":  {id: P06, Voc: 21.24, Isc: 1.22, Pmax: 20}
+    "18 Oct/7":  {id: P07, Voc: 21.66, Isc: 2.89, Pmax: 50}
+    "18 Oct/8":  {id: P08, Voc: 21.66, Isc: 2.89, Pmax: 50}
+    "18 Oct/9":  {id: P09, Voc: 21.66, Isc: 2.89, Pmax: 50}
+    "18 Oct/10": {id: P10, Voc: 21.60, Isc: 4.32, Pmax: 65}
+    "18 Oct/11": {id: P11, Voc: 21.60, Isc: 4.32, Pmax: 65}
+    "18 Oct/12": {id: P12, Voc: 21.60, Isc: 4.32, Pmax: 65}
+    "18 Oct/13": {id: P13, Voc: 21.60, Isc: 4.32, Pmax: 65}
+  irradiance_W_m2: null          # not recorded -> no STC translation, no epsilon_rated (Phase 4.4)
+  module_temp_C: null
+  area_m2: null                  # needed only for efficiency
+
+cleaning:  {hampel_window: 7, hampel_k: 3.0, hampel_floor_frac: 0.01}
+smoothing: {n_knots: 18, lambda: 1.0e-3, resid_k: 4.0, resid_floor: 0.02,
+            step_ratio: 1.4, step_match_V: 1.0, n_curve_points: 1500,
+            anchor_v: 0.15, blend_width: 0.05}
+metrics:   {pref_window_frac: 0.10, pref_poly_order: 4,
+            rs_window_frac: 0.05, rsh_window_frac: 0.20}
+sdm_gate:  {max_nrmse: 0.012, n_min: 0.9, n_max: 2.5}
+qc:        {min_current_coverage: 0.85, min_isc_A: 0.15, max_header_mismatch: 0.10,
+            min_v_coverage: 0.25, max_pair_isc_diff: 0.10}
+acceptance: {err_pmax_normal_pct: 1.0, err_pmax_stepped_pct: 2.5, repeat_pct: 2.0}
+
+# PROVA 200A datasheet accuracy (limits, 23 +/- 5 C): +/-(rdg% x reading + fs% x Vopen|Ishort + offset).
+# Treated as rectangular limits -> standard uncertainty = limit / sqrt(3) (GUM).
+# Check the 0.6-1 A current offset against the manual (listings disagree: 0.9 mA vs 9 mA).
+instrument:
+  V: {rdg_pct: 1.0, fs_pct: 1.0, offset_low: 0.009, offset_high: 0.09, split: 6.0}
+  I: {rdg_pct: 1.0, fs_pct: 1.0, offset_low: 0.0009, offset_high: 0.009, split: 0.6}
+
+plots:     {width_single_in: 3.5, width_double_in: 7.16, dpi: 600, formats: [pdf, png]}

@@ -1,0 +1,9 @@
+{ "version": "0.2.0",
+  "configurations": [
+    { "name": "Run pipeline", "type": "debugpy", "request": "launch",
+      "module": "src.main", "cwd": "${workspaceFolder}", "console": "integratedTerminal" },
+    { "name": "One panel", "type": "debugpy", "request": "launch",
+      "module": "src.main", "args": ["--file", "1 Nov", "--panel", "4"],
+      "cwd": "${workspaceFolder}", "console": "integratedTerminal" },
+    { "name": "Tests", "type": "debugpy", "request": "launch",
+      "module": "pytest", "args": ["-q"], "cwd": "${workspaceFolder}", "console": "integratedTerminal" } ] }
