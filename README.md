@@ -13,7 +13,7 @@ uv venv .venv --python 3.12 && uv pip install --python .venv/Scripts/python.exe 
 ```
 Tune thresholds only in `config.yaml`; try them on one sweep with `explore.py` (`# %%` cells).
 
-## Outputs (`outputs/`, not in git)
+## Outputs (`outputs/`)
 
 | | |
 |---|---|
